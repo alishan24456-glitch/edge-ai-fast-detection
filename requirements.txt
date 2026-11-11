@@ -1,0 +1,5 @@
+ultralytics
+onnxruntime
+opencv-python
+numpy
+pillow
