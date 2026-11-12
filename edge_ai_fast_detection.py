@@ -3,8 +3,8 @@
 Edge AI Fast Detection -- the Speed Race
 =========================================
 
-One YOLOv8n detector, two ways of running it, racing side by side on the
-SAME footage:
+One YOLOv8s detector, two ways of running it, racing side by side on
+the SAME footage:
 
 * **LEFT  -- PyTorch FP32.** The standard way most people run YOLOv8:
   the ``.pt`` weights through PyTorch.
@@ -38,9 +38,16 @@ How the race is kept honest
 * "Latency" is the time of the model's ``predict`` call (pre-processing,
   inference and NMS inside Ultralytics), excluding video decoding and
   drawing. FPS in the table is ``1000 / average latency``.
+* Only vehicle classes are reported (COCO ids 1, 2, 3, 5, 7: bicycle,
+  car, motorcycle, bus, truck), at the full frame resolution
+  (``--imgsz``, default 1280) and a confidence threshold of 0.55 by
+  default. On aerial footage the smaller YOLOv8n at 640 px and a low
+  threshold labelled rooftops as trucks and buses; the larger model at
+  full resolution with the vehicle-only filter keeps every label on a
+  real vehicle.
 
-First run downloads ``yolov8n.pt`` automatically, exports
-``yolov8n.onnx`` if it is missing, and builds ``yolov8n_int8.onnx``
+First run downloads ``yolov8s.pt`` automatically, exports
+``yolov8s.onnx`` if it is missing, and builds ``yolov8s_int8.onnx``
 (dynamic quantisation) if that is missing too.
 
 Examples
@@ -105,6 +112,11 @@ RED = (70, 70, 230)
 BACKEND_TORCH = "torch"
 BACKEND_ONNX = "onnx"
 BACKEND_INT8 = "int8"
+
+# Set in main() from --model, e.g. "YOLOv8s"; shown in the race title bar.
+MODEL_LABEL = "YOLOv8s"
+# COCO class ids reported by default: bicycle, car, motorcycle, bus, truck.
+VEHICLE_CLASSES = [1, 2, 3, 5, 7]
 
 LABELS = {
     BACKEND_TORCH: ("PyTorch", "FP32"),
@@ -196,7 +208,7 @@ def draw_rect(img, x0, y0, x1, y1, color, fill=True):
 # ---------------------------------------------------------------------------
 # Model handling: download, ONNX export, INT8 quantisation (all automatic)
 # ---------------------------------------------------------------------------
-def ensure_models(model_name):
+def ensure_models(model_name, imgsz=1280):
     """Return (torch_model_path, onnx_path, int8_path_or_None)."""
     from ultralytics import YOLO
 
@@ -209,7 +221,8 @@ def ensure_models(model_name):
 
     if not os.path.exists(onnx_path):
         print("[setup] exporting ONNX (first run only) ...")
-        exported = torch_model.export(format="onnx", imgsz=640, dynamic=False)
+        exported = torch_model.export(format="onnx", imgsz=imgsz,
+                                      dynamic=False)
         if exported and os.path.exists(str(exported)):
             onnx_path = str(exported)
     print(f"[setup] ONNX model: {onnx_path}")
@@ -231,13 +244,14 @@ def ensure_models(model_name):
 class Runner:
     """One backend: wraps an Ultralytics model and times its predict calls."""
 
-    def __init__(self, key, path, imgsz, conf):
+    def __init__(self, key, path, imgsz, conf, classes=None):
         from ultralytics import YOLO
 
         self.key = key
         self.model = YOLO(path)
         self.imgsz = imgsz
         self.conf = conf
+        self.classes = classes
         self.latencies = []            # steady-state latencies (ms)
         self.recent = deque(maxlen=30)  # for the live FPS counter
         self.detections = 0
@@ -245,7 +259,7 @@ class Runner:
     def run(self, frame):
         t0 = time.perf_counter()
         results = self.model.predict(frame, imgsz=self.imgsz, conf=self.conf,
-                                     verbose=False)
+                                     classes=self.classes, verbose=False)
         latency_ms = (time.perf_counter() - t0) * 1000.0
         result = results[0]
         self.detections += len(result.boxes)
@@ -321,7 +335,7 @@ def race_frame(frame, results, runners, frame_idx, elapsed_note):
     # title bar
     TEXT.draw(canvas, (16, 10), "EDGE AI SPEED RACE", size=23, color=WHITE,
               bold=True)
-    TEXT.draw(canvas, (428, 14), "YOLOv8n -- PyTorch vs ONNX Runtime, "
+    TEXT.draw(canvas, (428, 14), f"{MODEL_LABEL} -- PyTorch vs ONNX Runtime, "
               "same footage, same frames", size=16, color=GREY)
     TEXT.draw(canvas, (W - 16, 12), elapsed_note, size=18, color=GREY,
               anchor="ra")
@@ -626,17 +640,21 @@ class SimCapture:
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(
-        description="Edge AI Fast Detection -- YOLOv8n speed race: "
+        description="Edge AI Fast Detection -- YOLOv8 speed race: "
                     "PyTorch FP32 vs ONNX Runtime on the same footage.")
     ap.add_argument("--source", default=None,
                     help="'pick' (default with no flag: file chooser), a "
                          "video path, or a webcam index such as 0")
-    ap.add_argument("--model", default="yolov8n.pt",
-                    help="YOLO weights to race (default yolov8n.pt)")
+    ap.add_argument("--model", default="yolov8s.pt",
+                    help="YOLO weights to race (default yolov8s.pt)")
     ap.add_argument("--output", default="output.mp4",
                     help="race video to write (default output.mp4)")
-    ap.add_argument("--imgsz", type=int, default=640)
-    ap.add_argument("--conf", type=float, default=0.25)
+    ap.add_argument("--imgsz", type=int, default=1280)
+    ap.add_argument("--conf", type=float, default=0.55)
+    ap.add_argument("--classes", default="1,2,3,5,7",
+                    help="comma-separated COCO class ids to report "
+                         "(default: vehicles only -- bicycle, car, "
+                         "motorcycle, bus, truck; empty string = all)")
     ap.add_argument("--warmup", type=int, default=10,
                     help="frames excluded from the averages (default 10)")
     ap.add_argument("--max-seconds", type=float, default=0,
@@ -651,14 +669,23 @@ def main():
                          "delivered demo is always real footage)")
     args = ap.parse_args()
 
-    pt_path, onnx_path, int8_path = ensure_models(args.model)
+    global MODEL_LABEL
+    stem = os.path.splitext(os.path.basename(args.model))[0]
+    MODEL_LABEL = "YOLO" + stem[4:] if stem.lower().startswith("yolo") else stem
+    classes = None
+    if args.classes and args.classes.strip():
+        classes = [int(x) for x in args.classes.split(",") if x.strip()]
+
+    pt_path, onnx_path, int8_path = ensure_models(args.model, args.imgsz)
     runners = {
-        BACKEND_TORCH: Runner(BACKEND_TORCH, pt_path, args.imgsz, args.conf),
-        BACKEND_ONNX: Runner(BACKEND_ONNX, onnx_path, args.imgsz, args.conf),
+        BACKEND_TORCH: Runner(BACKEND_TORCH, pt_path, args.imgsz, args.conf,
+                              classes),
+        BACKEND_ONNX: Runner(BACKEND_ONNX, onnx_path, args.imgsz, args.conf,
+                             classes),
     }
     if int8_path:
         runners[BACKEND_INT8] = Runner(BACKEND_INT8, int8_path, args.imgsz,
-                                       args.conf)
+                                       args.conf, classes)
 
     def reopen_source():
         """A fresh frame source for the INT8 pass (same footage/scene)."""
@@ -750,9 +777,9 @@ def main():
     notes = [
         "Latency = Ultralytics predict() call time (pre-processing + "
         "inference + NMS); video decode and drawing excluded.",
-        f"Settings: imgsz {args.imgsz}, conf {args.conf}, first "
-        f"{args.warmup} frames excluded as warmup; backend order alternated "
-        "every frame.",
+        f"Settings: model {args.model}, imgsz {args.imgsz}, conf "
+        f"{args.conf}, vehicle classes only, first {args.warmup} frames "
+        "excluded as warmup; order alternated.",
         "CPU-only run on the machine that produced this video. "
         "Numbers vary by hardware -- run it on yours.",
     ]
